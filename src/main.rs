@@ -3,9 +3,14 @@
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use std::net as stdnet;
+
+//TODO: split!
 
 #[derive(Clone)]
 pub struct Waker {
@@ -322,16 +327,44 @@ impl<T: ToyTask> Future for ToyTaskToFuture<T> {
     }
 }
 
-/*
-struct TcpListener {
-
+/// Used to associate an IO type with a Selector
+#[derive(Debug)]
+pub struct MioSelectorId {
+    id: AtomicUsize,
 }
 
-impl TcpListener {
-    fn bind(addr: &SocketAddr) -> io::Result<TcpListener>;
-    fn accept(&mut self) -> AsyncIoResult<(TcpStream, SocketAddr)>;
+impl MioSelectorId {
+    fn new() -> MioSelectorId {
+        MioSelectorId {
+            id: AtomicUsize::new(0),
+        }
+    }
 }
-*/
+
+pub struct MioTcpStream {
+    sys: stdnet::TcpStream,
+    selector_id: MioSelectorId,
+}
+
+struct MioTcpListener {
+    sys: stdnet::TcpListener,
+    selector_id: MioSelectorId,
+}
+
+impl MioTcpListener {
+    fn bind(addr: &stdnet::SocketAddr) -> io::Result<MioTcpListener> {
+        // mio has platform dependent code here
+        // seems we dont need it
+        stdnet::TcpListener::bind(addr).map(|stdlistener| MioTcpListener {
+            sys: stdlistener,
+            selector_id: MioSelectorId::new(),
+        })
+    }
+
+    //fn accept(&mut self) -> AsyncIoResult<(MioTcpStream, stdnet::SocketAddr)> {
+    // TODO: continue from here
+    //};
+}
 
 struct ReadExactData<R> {
     reader: R,
