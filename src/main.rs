@@ -346,6 +346,21 @@ pub struct MioTcpStream {
     selector_id: MioSelectorId,
 }
 
+impl MioTcpStream {
+    pub fn from_stream(stream: stdnet::TcpStream) -> io::Result<MioTcpStream> {
+        MioTcpStream::set_nonblocking(&stream)?;
+
+        Ok(MioTcpStream {
+            sys: stream,
+            selector_id: MioSelectorId::new()
+        })
+    }
+
+    fn set_nonblocking(stream: &stdnet::TcpStream) -> io::Result<()> {
+        stream.set_nonblocking(true)
+    }
+}
+
 struct MioTcpListener {
     sys: stdnet::TcpListener,
     selector_id: MioSelectorId,
@@ -361,9 +376,11 @@ impl MioTcpListener {
         })
     }
 
-    //fn accept(&mut self) -> AsyncIoResult<(MioTcpStream, stdnet::SocketAddr)> {
-    // TODO: continue from here
-    //};
+    fn accept(&mut self) -> io::Result<(MioTcpStream, stdnet::SocketAddr)> {
+        // TODO: continue from here
+        let (s, a) = try!(self.sys.accept());
+        Ok((MioTcpStream::from_stream(s)?, a))
+    }
 }
 
 struct ReadExactData<R> {
