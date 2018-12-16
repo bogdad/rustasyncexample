@@ -1,5 +1,6 @@
 #![feature(never_type)]
 
+use std::os::unix::io::RawFd;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -380,6 +381,48 @@ impl MioTcpListener {
         // TODO: continue from here
         let (s, a) = try!(self.sys.accept());
         Ok((MioTcpStream::from_stream(s)?, a))
+    }
+}
+
+pub struct MioKQueueSelector {
+    id: usize,
+    kq: RawFd,
+}
+
+pub struct MioPoll {
+    selector: MioKQueueSelector
+    //TODO: add
+}
+
+
+pub trait MioEvented {
+    fn register(&self);
+    fn reregister(&self);
+    fn deregister(&self);
+}
+
+pub struct PollEvented<E: MioEvented> {
+    io: Option<E>,
+    //registration: Registration, // TODO: check if our registration is correct
+    //read_readiness: AtomicUsize,
+    //write_readiness: AtomicUsize,
+}
+
+
+
+struct TokioTcpListener {
+    // TODO: state?
+}
+
+
+impl TokioTcpListener {
+    pub fn bind(addr: &stdnet::SocketAddr) -> io::Result<TokioTcpListener> {
+        let l = MioTcpListener::bind(addr)?;
+        Ok(TokioTcpListener::new(l))
+    }
+
+    fn new(listener: MioTcpListener) -> TokioTcpListener {
+        // TODO: what is PollEvented?
     }
 }
 
