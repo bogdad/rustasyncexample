@@ -4,8 +4,8 @@ use std::os::unix::io::RawFd;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::atomic::AtomicUsize;
-use std::sync::{mpsc, Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicUsize, AtomicPtr};
+use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -285,7 +285,7 @@ impl ToyTask for Periodic {
     }
 }
 
-type AsyncResult<T, E> = Poll<Result<T, E>>;
+type AsyncResult<T, E> = TokioPoll<Result<T, E>>;
 type AsyncIoResult<T> = AsyncResult<T, io::Error>;
 
 /// An asynchronous computation that completes with a value or an error.
@@ -295,11 +295,11 @@ trait Future {
 
     /// Attempt to complete the future, yielding `Ok(Async::Pending)`
     /// if the future is blocked waiting for some other event to occur.
-    fn poll(&mut self, waker: &Waker) -> Poll<Result<Self::Item, Self::Error>>;
+    fn poll(&mut self, waker: &Waker) -> TokioPoll<Result<Self::Item, Self::Error>>;
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub enum Poll<T> {
+pub enum TokioPoll<T> {
     /// Represents that a value is immediately ready.
     Ready(T),
 
@@ -320,10 +320,10 @@ impl<T: ToyTask> Future for ToyTaskToFuture<T> {
     type Item = ();
     type Error = !;
 
-    fn poll(&mut self, waker: &Waker) -> Poll<Result<(), !>> {
+    fn poll(&mut self, waker: &Waker) -> TokioPoll<Result<(), !>> {
         match self.0.poll(waker) {
-            Async::Ready(x) => Poll::Ready(Ok(x)),
-            Async::Pending => Poll::Pending,
+            Async::Ready(x) => TokioPoll::Ready(Ok(x)),
+            Async::Pending => TokioPoll::Pending,
         }
     }
 }
@@ -362,6 +362,70 @@ impl MioTcpStream {
     }
 }
 
+pub struct MioKQueueSelector {
+    id: usize,
+    kq: RawFd,
+}
+
+
+struct MioReadinessQueueInner {
+    // Used to wake up `Poll` when readiness is set in another thread.
+    awakener: sys::Awakener,
+
+    // Head of the MPSC queue used to signal readiness to `Poll::poll`.
+    head_readiness: AtomicPtr<ReadinessNode>,
+
+    // Tail of the readiness queue.
+    //
+    // Only accessed by Poll::poll. Coordination will be handled by the poll fn
+    tail_readiness: UnsafeCell<*mut ReadinessNode>,
+
+    // Fake readiness node used to punctuate the end of the readiness queue.
+    // Before attempting to read from the queue, this node is inserted in order
+    // to partition the queue between nodes that are "owned" by the dequeue end
+    // and nodes that will be pushed on by producers.
+    end_marker: Box<ReadinessNode>,
+
+    // Similar to `end_marker`, but this node signals to producers that `Poll`
+    // has gone to sleep and must be woken up.
+    sleep_marker: Box<ReadinessNode>,
+
+    // Similar to `end_marker`, but the node signals that the queue is closed.
+    // This happens when `ReadyQueue` is dropped and signals to producers that
+    // the nodes should no longer be pushed into the queue.
+    closed_marker: Box<ReadinessNode>,
+}
+
+#[derive(Clone)]
+struct MioReadinessQueue {
+    inner: Arc<MioReadinessQueueInner>,
+}
+
+pub struct MioPoll {
+    selector: MioKQueueSelector,
+
+    // Custom readiness queue
+    readiness_queue: MioReadinessQueue,
+
+    // Use an atomic to first check if a full lock will be required. This is a
+    // fast-path check for single threaded cases avoiding the extra syscall
+    lock_state: AtomicUsize,
+
+    // Sequences concurrent calls to `Poll::poll`
+    lock: Mutex<()>,
+
+    // Wakeup the next waiter
+    condvar: Condvar,
+}
+
+
+pub trait MioEvented {
+    fn register(&self, &MioPoll, &Token);
+    fn reregister(&self);
+    fn deregister(&self);
+}
+
+
 struct MioTcpListener {
     sys: stdnet::TcpListener,
     selector_id: MioSelectorId,
@@ -384,24 +448,26 @@ impl MioTcpListener {
     }
 }
 
-pub struct MioKQueueSelector {
-    id: usize,
-    kq: RawFd,
+
+impl MioEvented for MioTcpListener {
+    fn register(&self, poll: &Poll, token: Token,
+                interest: Ready, opts: PollOpt) -> io::Result<()> {
+        self.selector_id.associate_selector(poll)?;
+        self.sys.register(poll, token, interest, opts)
+    }
+
+    fn reregister(&self, poll: &Poll, token: Token,
+                  interest: Ready, opts: PollOpt) -> io::Result<()> {
+        self.sys.reregister(poll, token, interest, opts)
+    }
+
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
+        self.sys.deregister(poll)
+    }
 }
 
-pub struct MioPoll {
-    selector: MioKQueueSelector
-    //TODO: add
-}
 
-
-pub trait MioEvented {
-    fn register(&self);
-    fn reregister(&self);
-    fn deregister(&self);
-}
-
-pub struct PollEvented<E: MioEvented> {
+pub struct TokioPollEvented<E: MioEvented> {
     io: Option<E>,
     //registration: Registration, // TODO: check if our registration is correct
     //read_readiness: AtomicUsize,
@@ -411,7 +477,7 @@ pub struct PollEvented<E: MioEvented> {
 
 
 struct TokioTcpListener {
-    // TODO: state?
+    io: TokioPollEvented<MioTcpListener>,
 }
 
 
@@ -422,7 +488,8 @@ impl TokioTcpListener {
     }
 
     fn new(listener: MioTcpListener) -> TokioTcpListener {
-        // TODO: what is PollEvented?
+        let io = TokioPollEvented::new(listener);
+        TokioTcpListener { io }
     }
 }
 
