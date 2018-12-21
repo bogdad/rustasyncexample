@@ -4,3 +4,4 @@ version = "0.1.0"
 authors = ["Vladimir <bogdad@gmail.com>"]
 
 [dependencies]
+libc   = "0.2.42"

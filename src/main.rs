@@ -4,12 +4,19 @@ use std::os::unix::io::RawFd;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::atomic::{AtomicUsize, AtomicPtr};
+use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicPtr, Ordering};
 use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-
+use std::cell::UnsafeCell;
 use std::net as stdnet;
+
+extern crate libc;
+
+
+mod miokqueue;
+
+use miokqueue::MioSelectorId;
 
 //TODO: split!
 
@@ -328,19 +335,9 @@ impl<T: ToyTask> Future for ToyTaskToFuture<T> {
     }
 }
 
-/// Used to associate an IO type with a Selector
-#[derive(Debug)]
-pub struct MioSelectorId {
-    id: AtomicUsize,
-}
 
-impl MioSelectorId {
-    fn new() -> MioSelectorId {
-        MioSelectorId {
-            id: AtomicUsize::new(0),
-        }
-    }
-}
+
+
 
 pub struct MioTcpStream {
     sys: stdnet::TcpStream,
@@ -362,68 +359,9 @@ impl MioTcpStream {
     }
 }
 
-pub struct MioKQueueSelector {
-    id: usize,
-    kq: RawFd,
-}
 
 
-struct MioReadinessQueueInner {
-    // Used to wake up `Poll` when readiness is set in another thread.
-    awakener: sys::Awakener,
 
-    // Head of the MPSC queue used to signal readiness to `Poll::poll`.
-    head_readiness: AtomicPtr<ReadinessNode>,
-
-    // Tail of the readiness queue.
-    //
-    // Only accessed by Poll::poll. Coordination will be handled by the poll fn
-    tail_readiness: UnsafeCell<*mut ReadinessNode>,
-
-    // Fake readiness node used to punctuate the end of the readiness queue.
-    // Before attempting to read from the queue, this node is inserted in order
-    // to partition the queue between nodes that are "owned" by the dequeue end
-    // and nodes that will be pushed on by producers.
-    end_marker: Box<ReadinessNode>,
-
-    // Similar to `end_marker`, but this node signals to producers that `Poll`
-    // has gone to sleep and must be woken up.
-    sleep_marker: Box<ReadinessNode>,
-
-    // Similar to `end_marker`, but the node signals that the queue is closed.
-    // This happens when `ReadyQueue` is dropped and signals to producers that
-    // the nodes should no longer be pushed into the queue.
-    closed_marker: Box<ReadinessNode>,
-}
-
-#[derive(Clone)]
-struct MioReadinessQueue {
-    inner: Arc<MioReadinessQueueInner>,
-}
-
-pub struct MioPoll {
-    selector: MioKQueueSelector,
-
-    // Custom readiness queue
-    readiness_queue: MioReadinessQueue,
-
-    // Use an atomic to first check if a full lock will be required. This is a
-    // fast-path check for single threaded cases avoiding the extra syscall
-    lock_state: AtomicUsize,
-
-    // Sequences concurrent calls to `Poll::poll`
-    lock: Mutex<()>,
-
-    // Wakeup the next waiter
-    condvar: Condvar,
-}
-
-
-pub trait MioEvented {
-    fn register(&self, &MioPoll, &Token);
-    fn reregister(&self);
-    fn deregister(&self);
-}
 
 
 struct MioTcpListener {
@@ -449,11 +387,16 @@ impl MioTcpListener {
 }
 
 
+
+
+
+
 impl MioEvented for MioTcpListener {
-    fn register(&self, poll: &Poll, token: Token,
-                interest: Ready, opts: PollOpt) -> io::Result<()> {
+    fn register(&self, poll: &MioPoll, token: MioToken,
+                interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
         self.selector_id.associate_selector(poll)?;
-        self.sys.register(poll, token, interest, opts)
+        // TODO: self.sys.register(poll, token, interest, opts)
+
     }
 
     fn reregister(&self, poll: &Poll, token: Token,
