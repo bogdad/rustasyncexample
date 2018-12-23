@@ -1,10 +1,19 @@
 /// Used to associate an IO type with a Selector
-#![#![feature(libc)]]
-use libc::{self, kevent};
+
+#[feature(libc)]
+
+use mioio::MioReady;
+use mioio::MioPollOpt;
+use std::os::raw::c_int;
+use std::os::raw::c_short;
+use libc;
 
 use std::cell::UnsafeCell;
 use std::io;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
+
+
 use std::os::unix::io::RawFd;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -22,14 +31,6 @@ impl From<MioToken> for usize {
     }
 }
 
-#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord)]
-pub struct MioReady(usize);
-
-#[derive(Copy, PartialEq, Eq, Clone, PartialOrd, Ord)]
-pub struct MioPollOpt(usize);
-
-
-
 
 #[derive(Debug)]
 pub struct MioSelectorId {
@@ -37,7 +38,7 @@ pub struct MioSelectorId {
 }
 
 impl MioSelectorId {
-    fn new() -> MioSelectorId {
+    pub fn new() -> MioSelectorId {
         MioSelectorId {
             id: AtomicUsize::new(0),
         }
@@ -59,6 +60,20 @@ struct MioAtomicState {
     inner: AtomicUsize,
 }
 
+#[cfg(not(target_os = "netbsd"))]
+type Filter = c_short;
+#[cfg(not(target_os = "netbsd"))]
+type UData = *mut ::libc::c_void;
+#[cfg(not(target_os = "netbsd"))]
+type Count = c_int;
+
+#[cfg(target_os = "netbsd")]
+type Filter = u32;
+#[cfg(target_os = "netbsd")]
+type UData = ::libc::intptr_t;
+#[cfg(target_os = "netbsd")]
+type Count = usize;
+
 
 macro_rules! kevent {
     ($id: expr, $filter: expr, $flags: expr, $data: expr) => {
@@ -76,6 +91,27 @@ macro_rules! kevent {
 pub struct MioKQueueSelector {
     id: usize,
     kq: RawFd,
+}
+
+trait IsMinusOne {
+    fn is_minus_one(&self) -> bool;
+}
+
+impl IsMinusOne for i32 {
+    fn is_minus_one(&self) -> bool { *self == -1 }
+}
+impl IsMinusOne for isize {
+    fn is_minus_one(&self) -> bool { *self == -1 }
+}
+
+fn cvt<T: IsMinusOne>(t: T) -> ::io::Result<T> {
+    use std::io;
+
+    if t.is_minus_one() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(t)
+    }
 }
 
 impl MioKQueueSelector {

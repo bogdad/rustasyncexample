@@ -1,20 +1,27 @@
 #![feature(never_type)]
 
+use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
+use miokqueue::MioEvented;
+use miokqueue::MioPollOpt;
+use miokqueue::MioToken;
+use mioio::MioReady;
+use miokqueue::MioPoll;
+use miokqueue::MioUnixEventedFd;
+
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicUsize, AtomicPtr, Ordering};
-use std::sync::{mpsc, Arc, Condvar, Mutex, MutexGuard};
+use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::cell::UnsafeCell;
 use std::net as stdnet;
 
 extern crate libc;
 
 
 mod miokqueue;
+mod mioio;
 
 use miokqueue::MioSelectorId;
 
@@ -386,26 +393,26 @@ impl MioTcpListener {
     }
 }
 
-
-
-
-
+impl AsRawFd for MioTcpListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.sys.as_raw_fd()
+    }
+}
 
 impl MioEvented for MioTcpListener {
     fn register(&self, poll: &MioPoll, token: MioToken,
                 interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
         self.selector_id.associate_selector(poll)?;
-        // TODO: self.sys.register(poll, token, interest, opts)
-
+        MioUnixEventedFd(&self.as_raw_fd()).register(poll, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &Poll, token: Token,
-                  interest: Ready, opts: PollOpt) -> io::Result<()> {
-        self.sys.reregister(poll, token, interest, opts)
+    fn reregister(&self, poll: &MioPoll, token: MioToken,
+                  interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
+       MioUnixEventedFd(&self.as_raw_fd()).reregister(poll, token, interest, opts)
     }
 
-    fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        self.sys.deregister(poll)
+    fn deregister(&self, poll: &MioPoll) -> io::Result<()> {
+        MioUnixEventedFd(&self.as_raw_fd()).deregister(poll)
     }
 }
 
@@ -461,3 +468,21 @@ fn main() {
 
     exec.run()
 }
+
+#[test]
+fn testMain() {
+    let timer = ToyTimer::new();
+    let exec = ToyExec::new();
+
+    for i in 1..11 {
+        exec.spawn(Periodic::new(
+            i,
+            Duration::from_millis(i * 500),
+            timer.clone(),
+        ));
+    }
+
+    exec.run()
+}
+
+
