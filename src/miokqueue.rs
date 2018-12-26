@@ -1,4 +1,3 @@
-#![feature(libc)]
 use libc;
 use mioio::MioPollOpt;
 

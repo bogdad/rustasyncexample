@@ -1,5 +1,4 @@
 #![feature(never_type)]
-#![feature(libc)]
 
 use mioio::MioPollOpt;
 use mioio::MioReady;
@@ -535,6 +534,7 @@ fn main() {
 
 #[test]
 fn testMain() {
+    /*
     let timer = ToyTimer::new();
     let exec = ToyExec::new();
 
@@ -544,7 +544,9 @@ fn testMain() {
             Duration::from_millis(i * 500),
             timer.clone(),
         ));
-    }
 
-    exec.run()
+        exec.run()
+    }*/
+
+
 }
