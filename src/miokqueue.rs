@@ -1,18 +1,19 @@
-/// Used to associate an IO type with a Selector
+#![feature(libc)]
+use libc;
+use mioio::MioPollOpt;
 
-#[feature(libc)]
 
 use mioio::MioReady;
-use mioio::MioPollOpt;
+
+use std::ptr;
+
 use std::os::raw::c_int;
 use std::os::raw::c_short;
-use libc;
 
 use std::cell::UnsafeCell;
 use std::io;
-use std::sync::{Arc, Condvar, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicUsize, Ordering};
-
+use std::sync::{Arc, Condvar, Mutex};
 
 use std::os::unix::io::RawFd;
 
@@ -31,7 +32,6 @@ impl From<MioToken> for usize {
     }
 }
 
-
 #[derive(Debug)]
 pub struct MioSelectorId {
     id: AtomicUsize,
@@ -48,7 +48,10 @@ impl MioSelectorId {
         let selector_id = self.id.load(Ordering::SeqCst);
 
         if selector_id != 0 && selector_id != poll.selector.id {
-            Err(io::Error::new(io::ErrorKind::Other, "socket already registered"))
+            Err(io::Error::new(
+                io::ErrorKind::Other,
+                "socket already registered",
+            ))
         } else {
             self.id.store(poll.selector.id, Ordering::SeqCst);
             Ok(())
@@ -74,7 +77,6 @@ type UData = ::libc::intptr_t;
 #[cfg(target_os = "netbsd")]
 type Count = usize;
 
-
 macro_rules! kevent {
     ($id: expr, $filter: expr, $flags: expr, $data: expr) => {
         libc::kevent {
@@ -85,7 +87,7 @@ macro_rules! kevent {
             data: 0,
             udata: $data as UData,
         }
-    }
+    };
 }
 
 pub struct MioKQueueSelector {
@@ -98,10 +100,14 @@ trait IsMinusOne {
 }
 
 impl IsMinusOne for i32 {
-    fn is_minus_one(&self) -> bool { *self == -1 }
+    fn is_minus_one(&self) -> bool {
+        *self == -1
+    }
 }
 impl IsMinusOne for isize {
-    fn is_minus_one(&self) -> bool { *self == -1 }
+    fn is_minus_one(&self) -> bool {
+        *self == -1
+    }
 }
 
 fn cvt<T: IsMinusOne>(t: T) -> ::io::Result<T> {
@@ -115,34 +121,56 @@ fn cvt<T: IsMinusOne>(t: T) -> ::io::Result<T> {
 }
 
 impl MioKQueueSelector {
-    pub fn register(&self, fd: RawFd, token: MioToken, interests: MioReady, opts: MioPollOpt) -> io::Result<()> {
+    pub fn register(
+        &self,
+        fd: RawFd,
+        token: MioToken,
+        interests: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
         //trace!("registering; token={:?}; interests={:?}", token, interests);
 
-        let flags = if opts.contains(MioPollOpt::edge()) { libc::EV_CLEAR } else { 0 } |
-                    if opts.contains(MioPollOpt::oneshot()) { libc::EV_ONESHOT } else { 0 } |
-                    libc::EV_RECEIPT;
+        let flags = if opts.contains(MioPollOpt::edge()) {
+            libc::EV_CLEAR
+        } else {
+            0
+        } | if opts.contains(MioPollOpt::oneshot()) {
+            libc::EV_ONESHOT
+        } else {
+            0
+        } | libc::EV_RECEIPT;
 
         unsafe {
-            let r = if interests.contains(MioReady::readable()) { libc::EV_ADD } else { libc::EV_DELETE };
-            let w = if interests.contains(MioReady::writable()) { libc::EV_ADD } else { libc::EV_DELETE };
+            let r = if interests.contains(MioReady::readable()) {
+                libc::EV_ADD
+            } else {
+                libc::EV_DELETE
+            };
+            let w = if interests.contains(MioReady::writable()) {
+                libc::EV_ADD
+            } else {
+                libc::EV_DELETE
+            };
             let mut changes = [
                 kevent!(fd, libc::EVFILT_READ, flags | r, usize::from(token)),
                 kevent!(fd, libc::EVFILT_WRITE, flags | w, usize::from(token)),
             ];
 
-            cvt(libc::kevent(self.kq,
-                             changes.as_ptr(),
-                             changes.len() as Count,
-                             changes.as_mut_ptr(),
-                             changes.len() as Count,
-                             ::std::ptr::null()))?;
+            cvt(libc::kevent(
+                self.kq,
+                changes.as_ptr(),
+                changes.len() as Count,
+                changes.as_mut_ptr(),
+                changes.len() as Count,
+                ::std::ptr::null(),
+            ))?;
 
             for change in changes.iter() {
                 debug_assert_eq!(change.flags & libc::EV_ERROR, libc::EV_ERROR);
 
                 // Test to see if an error happened
                 if change.data == 0 {
-                    continue
+                    continue;
                 }
 
                 // Older versions of OSX (10.11 and 10.10 have been witnessed)
@@ -158,15 +186,20 @@ impl MioKQueueSelector {
                 // ignore `EPIPE` here instead of propagating it.
                 //
                 // More info can be found at carllerche/mio#582
-                if change.data as i32 == libc::EPIPE &&
-                   change.filter == libc::EVFILT_WRITE as Filter {
-                    continue
+                if change.data as i32 == libc::EPIPE
+                    && change.filter == libc::EVFILT_WRITE as Filter
+                {
+                    continue;
                 }
 
                 // ignore ENOENT error for EV_DELETE
-                let orig_flags = if change.filter == libc::EVFILT_READ as Filter { r } else { w };
+                let orig_flags = if change.filter == libc::EVFILT_READ as Filter {
+                    r
+                } else {
+                    w
+                };
                 if change.data as i32 == libc::ENOENT && orig_flags & libc::EV_DELETE != 0 {
-                    continue
+                    continue;
                 }
 
                 return Err(::std::io::Error::from_raw_os_error(change.data as i32));
@@ -174,9 +207,51 @@ impl MioKQueueSelector {
             Ok(())
         }
     }
+
+    pub fn reregister(
+        &self,
+        fd: RawFd,
+        token: MioToken,
+        interests: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
+        self.register(fd, token, interests, opts)
+    }
+
+    pub fn deregister(&self, fd: RawFd) -> io::Result<()> {
+        unsafe {
+            // EV_RECEIPT is a nice way to apply changes and get back per-event results while not
+            // draining the actual changes.
+            let filter = libc::EV_DELETE | libc::EV_RECEIPT;
+
+            let mut changes = [
+                kevent!(fd, libc::EVFILT_READ, filter, ptr::null_mut()),
+                kevent!(fd, libc::EVFILT_WRITE, filter, ptr::null_mut()),
+            ];
+
+            cvt(libc::kevent(
+                self.kq,
+                changes.as_ptr(),
+                changes.len() as Count,
+                changes.as_mut_ptr(),
+                changes.len() as Count,
+                ::std::ptr::null(),
+            ))
+            .map(|_| ())?;
+
+            if changes[0].data as i32 == libc::ENOENT && changes[1].data as i32 == libc::ENOENT {
+                return Err(::std::io::Error::from_raw_os_error(changes[0].data as i32));
+            }
+            for change in changes.iter() {
+                debug_assert_eq!(libc::EV_ERROR & change.flags, libc::EV_ERROR);
+                if change.data != 0 && change.data as i32 != libc::ENOENT {
+                    return Err(::std::io::Error::from_raw_os_error(changes[0].data as i32));
+                }
+            }
+            Ok(())
+        }
+    }
 }
-
-
 
 struct MioReadinessNode {
     // Node state, see struct docs for `ReadinessState`
@@ -228,7 +303,6 @@ struct MioReadinessNode {
     ref_count: AtomicUsize,
 }
 
-
 struct MioReadinessQueueInner {
     // Used to wake up `Poll` when readiness is set in another thread.
     //awakener: sys::Awakener,
@@ -279,23 +353,32 @@ pub struct MioPoll {
     condvar: Condvar,
 }
 
-
 pub trait MioEvented {
     fn register(&self, &MioPoll, MioToken, MioReady, MioPollOpt) -> io::Result<()>;
     fn reregister(&self, &MioPoll, MioToken, MioReady, MioPollOpt) -> io::Result<()>;
     fn deregister(&self, &MioPoll) -> io::Result<()>;
 }
 
-
-
 pub struct MioUnixEventedFd<'a>(pub &'a RawFd);
 
 impl<'a> MioEvented for MioUnixEventedFd<'a> {
-    fn register(&self, poll: &MioPoll, token: MioToken, interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
+    fn register(
+        &self,
+        poll: &MioPoll,
+        token: MioToken,
+        interest: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
         poll.selector.register(*self.0, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &MioPoll, token: MioToken, interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
+    fn reregister(
+        &self,
+        poll: &MioPoll,
+        token: MioToken,
+        interest: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
         poll.selector.reregister(*self.0, token, interest, opts)
     }
 

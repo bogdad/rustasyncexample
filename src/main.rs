@@ -1,27 +1,31 @@
 #![feature(never_type)]
+#![feature(libc)]
 
+use mioio::MioPollOpt;
+use mioio::MioReady;
+use miokqueue::MioEvented;
+use miokqueue::MioPoll;
+use miokqueue::MioToken;
+use miokqueue::MioUnixEventedFd;
+use std::cell::UnsafeCell;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::io::RawFd;
-use miokqueue::MioEvented;
-use miokqueue::MioPollOpt;
-use miokqueue::MioToken;
-use mioio::MioReady;
-use miokqueue::MioPoll;
-use miokqueue::MioUnixEventedFd;
+use std::sync::atomic::AtomicUsize;
+use std::sync::Weak;
 
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io;
+use std::net as stdnet;
 use std::sync::{mpsc, Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
-use std::net as stdnet;
+use std::usize;
 
 extern crate libc;
 
-
-mod miokqueue;
 mod mioio;
+mod miokqueue;
 
 use miokqueue::MioSelectorId;
 
@@ -342,10 +346,6 @@ impl<T: ToyTask> Future for ToyTaskToFuture<T> {
     }
 }
 
-
-
-
-
 pub struct MioTcpStream {
     sys: stdnet::TcpStream,
     selector_id: MioSelectorId,
@@ -357,7 +357,7 @@ impl MioTcpStream {
 
         Ok(MioTcpStream {
             sys: stream,
-            selector_id: MioSelectorId::new()
+            selector_id: MioSelectorId::new(),
         })
     }
 
@@ -365,11 +365,6 @@ impl MioTcpStream {
         stream.set_nonblocking(true)
     }
 }
-
-
-
-
-
 
 struct MioTcpListener {
     sys: stdnet::TcpListener,
@@ -400,15 +395,25 @@ impl AsRawFd for MioTcpListener {
 }
 
 impl MioEvented for MioTcpListener {
-    fn register(&self, poll: &MioPoll, token: MioToken,
-                interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
+    fn register(
+        &self,
+        poll: &MioPoll,
+        token: MioToken,
+        interest: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
         self.selector_id.associate_selector(poll)?;
         MioUnixEventedFd(&self.as_raw_fd()).register(poll, token, interest, opts)
     }
 
-    fn reregister(&self, poll: &MioPoll, token: MioToken,
-                  interest: MioReady, opts: MioPollOpt) -> io::Result<()> {
-       MioUnixEventedFd(&self.as_raw_fd()).reregister(poll, token, interest, opts)
+    fn reregister(
+        &self,
+        poll: &MioPoll,
+        token: MioToken,
+        interest: MioReady,
+        opts: MioPollOpt,
+    ) -> io::Result<()> {
+        MioUnixEventedFd(&self.as_raw_fd()).reregister(poll, token, interest, opts)
     }
 
     fn deregister(&self, poll: &MioPoll) -> io::Result<()> {
@@ -416,20 +421,79 @@ impl MioEvented for MioTcpListener {
     }
 }
 
+pub struct TokioRegistration {
+    inner: UnsafeCell<Option<TokioRegistrationInner>>,
+    state: AtomicUsize,
+}
+
+/// Initial state. The handle is not set and the registration is idle.
+const INIT: usize = 0;
+
+/// A thread locked the state and will associate a handle.
+const LOCKED: usize = 1;
+
+/// A handle has been associated with the registration.
+const READY: usize = 2;
+
+/// Masks the lifecycle state
+const LIFECYCLE_MASK: usize = 0b11;
+
+/// A fake token used to identify error situations
+const ERROR: usize = usize::MAX;
+
+impl TokioRegistration {
+    pub fn new() -> TokioRegistration {
+        TokioRegistration {
+            inner: UnsafeCell::new(None),
+            state: AtomicUsize::new(INIT),
+        }
+    }
+}
+
+struct TokioRegistrationInner {
+    handle: TokioHandlePriv,
+    token: usize,
+}
+
+#[derive(Clone)]
+struct TokioHandlePriv {
+    inner: Weak<TokioPollEventedInner>,
+}
 
 pub struct TokioPollEvented<E: MioEvented> {
     io: Option<E>,
-    //registration: Registration, // TODO: check if our registration is correct
-    //read_readiness: AtomicUsize,
-    //write_readiness: AtomicUsize,
+    inner: TokioPollEventedInner,
 }
 
+struct TokioPollEventedInner {
+    registration: TokioRegistration,
 
+    /// Currently visible read readiness
+    read_readiness: AtomicUsize,
+
+    /// Currently visible write readiness
+    write_readiness: AtomicUsize,
+}
+
+impl<E> TokioPollEvented<E>
+where
+    E: MioEvented,
+{
+    pub fn new(io: E) -> TokioPollEvented<E> {
+        TokioPollEvented {
+            io: Some(io),
+            inner: TokioPollEventedInner {
+                registration: TokioRegistration::new(),
+                read_readiness: AtomicUsize::new(0),
+                write_readiness: AtomicUsize::new(0),
+            },
+        }
+    }
+}
 
 struct TokioTcpListener {
     io: TokioPollEvented<MioTcpListener>,
 }
-
 
 impl TokioTcpListener {
     pub fn bind(addr: &stdnet::SocketAddr) -> io::Result<TokioTcpListener> {
@@ -484,5 +548,3 @@ fn testMain() {
 
     exec.run()
 }
-
-
